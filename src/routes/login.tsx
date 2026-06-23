@@ -13,16 +13,34 @@ export const Route = createFileRoute("/login")({
   component: LoginPage,
 });
 
-const DEMO_USERS = [
-  { label: "Admin", email: "admin@officeflow.test", password: "Admin@123" },
-  { label: "Employee", email: "employee@officeflow.test", password: "Employee@123" },
+const ROLES = [
+  "Super Admin",
+  "MD",
+  "MD2",
+  "MD3",
+  "Payroll Manager",
+  "Department Head",
+  "Team Lead",
+  "Employee",
 ] as const;
+
+const DEMO_CREDENTIALS: Record<typeof ROLES[number], { email: string; password?: string }> = {
+  "Super Admin": { email: "vrujen.andhare@company.com", password: "demo1234" },
+  "MD": { email: "rakesh.andhare@company.com", password: "demo1234" },
+  "MD2": { email: "sanjeevain.andhare@company.com", password: "demo1234" },
+  "MD3": { email: "sanjeevain.andhare@company.com", password: "demo1234" },
+  "Payroll Manager": { email: "vrujen.andhare@company.com", password: "demo1234" },
+  "Department Head": { email: "kush.bhargava@company.com", password: "demo1234" },
+  "Team Lead": { email: "kush.bhargava@company.com", password: "demo1234" },
+  "Employee": { email: "niraj.tete@company.com", password: "demo1234" },
+};
 
 function LoginPage() {
   const navigate = useNavigate();
   const { user, loading, loginWithCredentials } = useAuth();
-  const [email, setEmail] = useState("admin@officeflow.test");
-  const [password, setPassword] = useState("Admin@123");
+  const [selectedRole, setSelectedRole] = useState<string>("Super Admin");
+  const [email, setEmail] = useState("vrujen.andhare@company.com");
+  const [password, setPassword] = useState("demo1234");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -108,20 +126,26 @@ function LoginPage() {
           </div>
 
           <div className="space-y-1.5">
-            <Label>Demo accounts</Label>
+            <Label>Sign in as (demo)</Label>
             <div className="grid grid-cols-2 gap-2">
-              {DEMO_USERS.map((demo) => (
+              {ROLES.map((r) => (
                 <button
-                  key={demo.email}
+                  key={r}
                   type="button"
                   onClick={() => {
-                    setEmail(demo.email);
-                    setPassword(demo.password);
+                    setSelectedRole(r);
+                    const creds = DEMO_CREDENTIALS[r];
+                    setEmail(creds.email);
+                    setPassword(creds.password || "demo1234");
                     setError("");
                   }}
-                  className="text-xs px-3 py-2 rounded-lg border glass border-white/10 hover:border-white/30"
+                  className={`text-xs px-3 py-2.5 rounded-xl border transition-all ${
+                    selectedRole === r
+                      ? "gradient-primary text-white border-transparent glow-primary font-medium"
+                      : "glass border-white/5 hover:border-white/10 hover:bg-white/5 text-muted-foreground"
+                  }`}
                 >
-                  {demo.label}
+                  {r}
                 </button>
               ))}
             </div>

@@ -23,8 +23,11 @@ const USER_KEY = "officeflow.user";
 const roleMap: Record<BackendRole, Role> = {
   SUPER_ADMIN: "Super Admin",
   MD: "MD",
+  MD2: "MD2",
+  MD3: "MD3",
   DEPARTMENT_HEAD: "Department Head",
   PAYROLL_MANAGER: "Payroll Manager",
+  TEAM_LEAD: "Team Lead",
   EMPLOYEE: "Employee",
 };
 

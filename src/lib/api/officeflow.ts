@@ -5,8 +5,11 @@ type ApiEnvelope<T> = { success: boolean; data: T };
 export type BackendRole =
   | "SUPER_ADMIN"
   | "MD"
+  | "MD2"
+  | "MD3"
   | "DEPARTMENT_HEAD"
   | "PAYROLL_MANAGER"
+  | "TEAM_LEAD"
   | "EMPLOYEE";
 
 export type AuthResponse = {
