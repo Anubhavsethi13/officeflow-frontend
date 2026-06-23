@@ -45,7 +45,7 @@ function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (!loading && user) navigate({ to: "/attendance" });
+    if (!loading && user) navigate({ to: "/welcome" });
   }, [loading, user, navigate]);
 
   const submit = async (e: React.FormEvent) => {
@@ -54,7 +54,7 @@ function LoginPage() {
     const ok = await loginWithCredentials(email, password);
     setSubmitting(false);
     if (ok) {
-      navigate({ to: "/attendance" });
+      navigate({ to: "/welcome" });
       return;
     }
 
