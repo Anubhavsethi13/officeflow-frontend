@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { canAccessPath } from "@/lib/access-control";
 import { toast } from "sonner";
+import { useWmsStore } from "@/lib/wms-store";
 
 type NavItem = { to: string; label: string; icon: typeof LayoutDashboard; exact?: boolean };
 const NAV: NavItem[] = [
@@ -36,8 +37,14 @@ export function WMSLayout({ children, title, subtitle }: { children: ReactNode; 
   const [open, setOpen] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [globalSearch, setGlobalSearch] = useState("");
+  const syncWithBackend = useWmsStore((state) => state.syncWithBackend);
 
   useEffect(() => { setHydrated(true); }, []);
+  useEffect(() => {
+    if (hydrated && user) {
+      syncWithBackend();
+    }
+  }, [hydrated, user, pathname, syncWithBackend]);
   useEffect(() => {
     if (!hydrated) return;
     if (loading) return;

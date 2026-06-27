@@ -152,10 +152,10 @@ function StockOutPage() {
     return true;
   };
 
-  const handleStockOutIssue = () => {
+  const handleStockOutIssue = async () => {
     if (!validateBeforeSave()) return;
     for (const line of lines) {
-      const result = issueStock({
+      const result = await issueStock({
         productId: line.productId,
         lotId: line.lotId,
         customerId,
@@ -202,9 +202,9 @@ function StockOutPage() {
     resetLinesFromStore(setLines);
   };
 
-  const saveDraft = () => {
+  const saveDraft = async () => {
     if (!validateBeforeSave()) return;
-    const result = createSalesInvoice(buildInvoicePayload(false));
+    const result = await createSalesInvoice(buildInvoicePayload(false));
     if (!result.ok || !result.invoice) {
       toast.error(result.message);
       return;
@@ -221,12 +221,12 @@ function StockOutPage() {
     setTallyDialogOpen(true);
   };
 
-  const confirmPushToTally = () => {
+  const confirmPushToTally = async () => {
     if (!tallyVoucherInput.trim()) {
       toast.error("Enter the Tally voucher number.");
       return;
     }
-    const result = createSalesInvoice(buildInvoicePayload(true, tallyVoucherInput.trim().toUpperCase()));
+    const result = await createSalesInvoice(buildInvoicePayload(true, tallyVoucherInput.trim().toUpperCase()));
     toast[result.ok ? "success" : "error"](result.message);
     setTallyDialogOpen(false);
     if (!result.ok || !result.invoice) return;

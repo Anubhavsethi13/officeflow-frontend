@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist, type StateStorage } from "zustand/middleware";
+import { officeflowApi } from "./api/officeflow";
 import {
   CATEGORIES,
   CUSTOMERS,
@@ -112,15 +113,16 @@ type WmsState = {
   addCustomer: (customer: Omit<Customer, "id">) => string;
   updateCustomer: (id: string, patch: Partial<Customer>) => Result;
   deleteCustomer: (id: string) => Result;
-  receiveStock: (payload: StockInPayload) => Result;
-  issueStock: (payload: StockOutPayload) => Result;
+  receiveStock: (payload: StockInPayload) => Promise<Result>;
+  issueStock: (payload: StockOutPayload) => Promise<Result>;
   transferStock: (payload: TransferPayload) => Result;
-  createSalesInvoice: (payload: SalesInvoicePayload) => Result & { invoice?: SalesInvoice };
+  createSalesInvoice: (payload: SalesInvoicePayload) => Promise<Result & { invoice?: SalesInvoice }>;
   markSalesInvoicePdfGenerated: (invoiceId: string) => Result;
   pushSalesInvoiceToTally: (invoiceId: string, tallyVoucherNumber: string) => Result;
   importProducts: (products: Array<Partial<Product> & Pick<Product, "name" | "code">>) => Result;
   updateSettings: (patch: Partial<WmsSettings>) => void;
   resetWms: () => void;
+  syncWithBackend: () => Promise<void>;
 };
 
 const noopStorage: StateStorage = {
@@ -358,239 +360,70 @@ export const useWmsStore = create<WmsState>()(
         set((state) => ({ customers: state.customers.filter((customer) => customer.id !== customerId) }));
         return { ok: true, message: "Customer deleted" };
       },
-      receiveStock: ({ vendorId, locationId, invoice, po, lines }) => {
+      receiveStock: async ({ vendorId, locationId, invoice, po, lines }) => {
         const validLines = lines.filter((line) => line.productId && line.qty > 0 && line.rate >= 0);
         if (!vendorId || !locationId || validLines.length === 0) {
           return { ok: false, message: "Select vendor, location and at least one valid item." };
         }
-        set((state) => {
-          let stockLots = [...state.stockLots];
-          let products = [...state.products];
-          let locations = [...state.locations];
-          let movements = [...state.movements];
-          validLines.forEach((line) => {
-            const lotIndex = stockLots.findIndex((lot) => sameLot(lot, line, locationId));
-            if (lotIndex >= 0) {
-              stockLots = stockLots.map((lot, index) => (index === lotIndex ? { ...lot, quantity: lot.quantity + line.qty } : lot));
-            } else {
-              stockLots = [
-                ...stockLots,
-                {
-                  id: id("lot"),
-                  productId: line.productId,
-                  locationId,
-                  quantity: line.qty,
-                  batchNumber: line.batch || undefined,
-                  serialNumber: line.serial || undefined,
-                  rate: line.rate,
-                },
-              ];
-            }
-            products = updateProductStock(products, line.productId, line.qty);
-            locations = adjustLocationOccupancy(locations, locationId, line.qty);
-            movements = [
-              ...movements,
-              {
-                id: id("mov"),
-                number: nextMovementNumber(movements, "IN"),
-                type: "IN",
-                productId: line.productId,
-                quantity: line.qty,
-                toLocationId: locationId,
-                vendorId,
-                reference: invoice || po || undefined,
-                rate: line.rate,
-                date: today(),
-                createdBy: "u-admin",
-                remarks: po ? `PO ${po}` : undefined,
-              },
-            ];
-          });
-          return { stockLots, products, locations, movements };
-        });
-        return { ok: true, message: `Saved inward for ${validLines.length} item${validLines.length === 1 ? "" : "s"}.` };
+        try {
+          for (const line of validLines) {
+            await officeflowApi.inventory.stockIn(line.productId, line.qty);
+          }
+          await get().syncWithBackend();
+          return { ok: true, message: `Saved inward for ${validLines.length} item${validLines.length === 1 ? "" : "s"}.` };
+        } catch (err: any) {
+          console.error("Failed to receive stock on backend:", err);
+          return { ok: false, message: err.message || "Failed to receive stock on backend." };
+        }
       },
-      issueStock: ({ productId, lotId, customerId, qty, reference, reason }) => {
+      issueStock: async ({ productId, lotId, customerId, qty, reference, reason }) => {
         const state = get();
         const lot = state.stockLots.find((item) => item.id === lotId && item.productId === productId);
         if (!lot) return { ok: false, message: "Selected product/location lot is not available." };
         if (qty <= 0) return { ok: false, message: "Quantity must be greater than zero." };
         if (qty > lot.quantity) return { ok: false, message: `Only ${lot.quantity} units are available in that lot.` };
-        set((current) => {
-          const stockLots = current.stockLots
-            .map((item) => (item.id === lotId ? { ...item, quantity: item.quantity - qty } : item))
-            .filter((item) => item.quantity > 0);
-          const movements = [
-            ...current.movements,
-            {
-              id: id("mov"),
-              number: nextMovementNumber(current.movements, "OUT"),
-              type: "OUT" as const,
-              productId,
-              quantity: qty,
-              fromLocationId: lot.locationId,
-              customerId,
-              reference: reference || undefined,
-              date: today(),
-              createdBy: "u-admin",
-              remarks: reason || undefined,
-            },
-          ];
-          return {
-            stockLots,
-            products: updateProductStock(current.products, productId, -qty),
-            locations: adjustLocationOccupancy(current.locations, lot.locationId, -qty),
-            movements,
-          };
-        });
-        return { ok: true, message: "Stock issued successfully." };
+        try {
+          await officeflowApi.inventory.stockOut(productId, qty);
+          await get().syncWithBackend();
+          return { ok: true, message: "Stock issued successfully." };
+        } catch (err: any) {
+          console.error("Failed to issue stock on backend:", err);
+          return { ok: false, message: err.message || "Failed to issue stock on backend." };
+        }
       },
-      createSalesInvoice: (payload) => {
+      createSalesInvoice: async (payload) => {
         const state = get();
         const customer = state.customers.find((item) => item.id === payload.customerId);
         const lines = payload.lines
-          .filter((line) => line.productId && line.lotId && line.qty > 0 && line.rate >= 0)
-          .map((line) => ({ ...line, discountPct: Math.min(99, Math.max(0, Number(line.discountPct || 0))) }));
+          .filter((line) => line.productId && line.qty > 0 && line.rate >= 0);
 
         if (!customer) return { ok: false, message: "Select a valid customer." };
         if (lines.length === 0) return { ok: false, message: "Add at least one invoice item." };
-        if (payload.pushedToTally && !payload.tallyVoucherNumber?.trim()) {
-          return { ok: false, message: "Enter the Tally voucher number for pushed invoices." };
-        }
 
-        const quantityByLot = new Map<string, number>();
-        for (const line of lines) {
-          const lot = state.stockLots.find((item) => item.id === line.lotId && item.productId === line.productId);
-          if (!lot) return { ok: false, message: "One or more selected stock lots are no longer available." };
-          quantityByLot.set(line.lotId, (quantityByLot.get(line.lotId) ?? 0) + line.qty);
-        }
-
-        for (const [lotId, requestedQty] of quantityByLot) {
-          const lot = state.stockLots.find((item) => item.id === lotId);
-          if (!lot || requestedQty > lot.quantity) {
-            return { ok: false, message: `Selected lot has only ${lot?.quantity ?? 0} units available.` };
-          }
-        }
-
-        let savedInvoice: SalesInvoice | undefined;
-        set((current) => {
-          const invoiceId = id("si");
-          const invoiceNumber = nextSalesInvoiceNumber(current.salesInvoices);
-          const interState = isInterStateSale(payload.customerGstNumber, payload.placeOfSupply);
-          let stockLots = [...current.stockLots];
-          let products = [...current.products];
-          let locations = [...current.locations];
-          let movements = [...current.movements];
-
-          const invoiceLines: SalesInvoiceLine[] = lines.map((line, index) => {
-            const product = current.products.find((item) => item.id === line.productId);
-            const lot = current.stockLots.find((item) => item.id === line.lotId);
-            const gross = line.qty * line.rate;
-            const discount = gross * (line.discountPct / 100);
-            const taxableValue = roundMoney(gross - discount);
-            const gstAmount = roundMoney(taxableValue * ((product?.gstRate ?? 0) / 100));
-            const cgst = interState ? 0 : roundMoney(gstAmount / 2);
-            const sgst = interState ? 0 : roundMoney(gstAmount / 2);
-            const igst = interState ? gstAmount : 0;
-
-            return {
-              id: `${invoiceId}-ln-${index + 1}`,
-              productId: line.productId,
-              lotId: line.lotId,
-              locationId: lot?.locationId ?? "",
-              description: product?.name ?? line.productId,
-              hsnCode: product?.hsnCode ?? "",
-              quantity: line.qty,
-              unit: product?.unit ?? "pcs",
-              rate: line.rate,
-              discountPct: line.discountPct,
-              taxableValue,
-              gstRate: product?.gstRate ?? 0,
-              cgst,
-              sgst,
-              igst,
-              total: roundMoney(taxableValue + cgst + sgst + igst),
-            };
-          });
-
-          invoiceLines.forEach((line) => {
-            stockLots = stockLots
-              .map((lot) => (lot.id === line.lotId ? { ...lot, quantity: lot.quantity - line.quantity } : lot))
-              .filter((lot) => lot.quantity > 0);
-            products = updateProductStock(products, line.productId, -line.quantity);
-            locations = adjustLocationOccupancy(locations, line.locationId, -line.quantity);
-            movements = [
-              ...movements,
-              {
-                id: id("mov"),
-                number: nextMovementNumber(movements, "OUT"),
-                type: "OUT" as const,
-                productId: line.productId,
-                quantity: line.quantity,
-                fromLocationId: line.locationId,
-                customerId: payload.customerId,
-                reference: invoiceNumber,
-                date: payload.date,
-                createdBy: "u-admin",
-                remarks: payload.pushedToTally
-                  ? `SI pushed to Tally${payload.tallyVoucherNumber ? ` / ${payload.tallyVoucherNumber}` : ""}`
-                  : "SI PDF generated locally",
-              },
-            ];
-          });
-
-          const subTotal = roundMoney(invoiceLines.reduce((sum, line) => sum + line.quantity * line.rate, 0));
-          const taxableTotal = roundMoney(invoiceLines.reduce((sum, line) => sum + line.taxableValue, 0));
-          const discountTotal = roundMoney(subTotal - taxableTotal);
-          const cgstTotal = roundMoney(invoiceLines.reduce((sum, line) => sum + line.cgst, 0));
-          const sgstTotal = roundMoney(invoiceLines.reduce((sum, line) => sum + line.sgst, 0));
-          const igstTotal = roundMoney(invoiceLines.reduce((sum, line) => sum + line.igst, 0));
-          const grandTotal = roundMoney(taxableTotal + cgstTotal + sgstTotal + igstTotal);
-
-          const invoice: SalesInvoice = {
-            id: invoiceId,
-            number: invoiceNumber,
-            date: payload.date,
-            dueDate: payload.dueDate || undefined,
+        try {
+          const backendPayload = {
             customerId: payload.customerId,
-            customerGstNumber: payload.customerGstNumber.trim(),
-            placeOfSupply: payload.placeOfSupply.trim() || customer.city,
-            paymentTerms: payload.paymentTerms.trim() || "Due on receipt",
-            pushedToTally: payload.pushedToTally,
-            tallyVoucherNumber: payload.tallyVoucherNumber?.trim() || undefined,
-            ewayBillNumber: payload.ewayBillNumber?.trim() || undefined,
-            notes: payload.notes?.trim() || undefined,
-            lines: invoiceLines,
-            subTotal,
-            discountTotal,
-            taxableTotal,
-            cgstTotal,
-            sgstTotal,
-            igstTotal,
-            grandTotal,
-            status: payload.pushedToTally ? "pushed" : "draft",
-            pdfGenerated: false,
-            createdBy: "u-admin",
-            createdAt: new Date().toISOString(),
+            items: lines.map((line) => ({
+              productId: line.productId,
+              quantity: line.qty,
+              price: line.rate,
+            })),
           };
-          savedInvoice = invoice;
+
+          const newInvoice = await officeflowApi.invoices.create(backendPayload);
+          await get().syncWithBackend();
+
+          const savedInvoice = get().salesInvoices.find((si) => si.id === newInvoice.id);
 
           return {
-            stockLots,
-            products,
-            locations,
-            movements,
-            salesInvoices: [...current.salesInvoices, invoice],
+            ok: true,
+            message: `Sales invoice ${savedInvoice?.number ?? ""} saved successfully.`,
+            invoice: savedInvoice,
           };
-        });
-
-        return {
-          ok: true,
-          message: savedInvoice?.pushedToTally
-            ? `Sales invoice ${savedInvoice.number} saved with Tally voucher.`
-            : `Sales invoice ${savedInvoice?.number ?? ""} saved as draft.`,
-          invoice: savedInvoice,
-        };
+        } catch (err: any) {
+          console.error("Failed to create sales invoice on backend:", err);
+          return { ok: false, message: err.message || "Failed to create sales invoice on backend." };
+        }
       },
       markSalesInvoicePdfGenerated: (invoiceId) => {
         const invoice = get().salesInvoices.find((item) => item.id === invoiceId);
@@ -741,6 +574,261 @@ export const useWmsStore = create<WmsState>()(
       },
       updateSettings: (patch) => set((state) => ({ settings: { ...state.settings, ...patch } })),
       resetWms: () => set(initialState),
+      syncWithBackend: async () => {
+        try {
+          const [beProducts, beInventory, beVendors, beCustomers] = await Promise.all([
+            officeflowApi.products.list(),
+            officeflowApi.inventory.list(),
+            officeflowApi.vendors.list(),
+            officeflowApi.customers.list(),
+          ]);
+
+          const beMovements = await officeflowApi.inventory.movements().catch(() => []);
+          const beInvoices = await officeflowApi.invoices.list().catch(() => []);
+
+          const vendors = beVendors.map((beVendor) => {
+            const existing = get().vendors.find((v) => v.id === beVendor.id);
+            if (existing) {
+              return { ...existing, name: beVendor.name, phone: beVendor.phone || "" };
+            }
+            return {
+              id: beVendor.id,
+              name: beVendor.name,
+              code: `V-${beVendor.id.slice(0, 4).toUpperCase()}`,
+              contactPerson: beVendor.name,
+              phone: beVendor.phone || "",
+              email: `${beVendor.name.toLowerCase().replace(/\s+/g, "")}@example.com`,
+              gstNumber: "27AAACA1234A1Z5",
+              city: "Mumbai",
+              categories: [],
+              paymentTerms: "Net 30",
+              status: "Active" as const,
+            };
+          });
+
+          const customers = beCustomers.map((beCustomer) => {
+            const existing = get().customers.find((c) => c.id === beCustomer.id);
+            if (existing) {
+              return { ...existing, name: beCustomer.name, phone: beCustomer.phone || "" };
+            }
+            return {
+              id: beCustomer.id,
+              name: beCustomer.name,
+              company: beCustomer.name,
+              contactPerson: beCustomer.name,
+              phone: beCustomer.phone || "",
+              email: `${beCustomer.name.toLowerCase().replace(/\s+/g, "")}@example.com`,
+              gstNumber: "27AACCN9876R1Z1",
+              city: "Pune",
+              status: "Active" as const,
+            };
+          });
+
+          let categories = [...get().categories];
+          beProducts.forEach((p) => {
+            if (p.category) {
+              const catExists = categories.some((c) => c.id === p.categoryId || c.id === p.category?.id);
+              if (!catExists && p.categoryId) {
+                categories.push({
+                  id: p.categoryId,
+                  name: p.category.name,
+                  code: p.category.name.substring(0, 4).toUpperCase(),
+                  parentId: null,
+                  type: "root",
+                  defaultUnit: "pcs",
+                  lowStockThreshold: 5,
+                  description: "Synced from backend",
+                  status: "Active",
+                });
+              }
+            }
+          });
+
+          const products = beProducts.map((beProduct) => {
+            const existing = get().products.find((p) => p.id === beProduct.id || p.sku === beProduct.sku);
+            const fallbackCategory = categories.find((c) => c.parentId === null);
+            const fallbackSubCategory = categories.find((c) => c.parentId === fallbackCategory?.id) ?? fallbackCategory;
+            const categoryId = beProduct.categoryId || fallbackCategory?.id || "c-hw";
+            const beInvQty = beInventory.find((item) => item.productId === beProduct.id)?.quantity ?? 0;
+
+            if (existing) {
+              return {
+                ...existing,
+                id: beProduct.id,
+                name: beProduct.name,
+                sku: beProduct.sku,
+                code: beProduct.sku,
+                categoryId,
+                currentStock: beInvQty,
+              };
+            }
+
+            return {
+              id: beProduct.id,
+              name: beProduct.name,
+              code: beProduct.sku,
+              sku: beProduct.sku,
+              barcode: `BC${beProduct.sku}`,
+              categoryId,
+              subCategoryId: fallbackSubCategory?.id || categoryId,
+              type: "hardware" as const,
+              brand: "Generic",
+              modelNumber: "-",
+              unit: "pcs",
+              hsnCode: "8443",
+              gstRate: 18,
+              minStock: 5,
+              maxStock: 50,
+              reorderLevel: 8,
+              purchasePrice: 100,
+              sellingPrice: 150,
+              currentStock: beInvQty,
+              reservedStock: 0,
+              imageHue: Math.floor(Math.random() * 360),
+              serialRequired: false,
+              batchRequired: false,
+              expiryRequired: false,
+              status: "Active" as const,
+            };
+          });
+
+          let stockLots = [...get().stockLots];
+          const beProductIds = beProducts.map((p) => p.id);
+          stockLots = stockLots.filter((lot) => beProductIds.includes(lot.productId));
+
+          products.forEach((product) => {
+            const beInvQty = beInventory.find((item) => item.productId === product.id)?.quantity ?? 0;
+            const productLots = stockLots.filter((lot) => lot.productId === product.id);
+            const lotsTotal = productLots.reduce((sum, lot) => sum + lot.quantity, 0);
+
+            if (beInvQty === 0) {
+              stockLots = stockLots.filter((lot) => lot.productId !== product.id);
+            } else if (productLots.length > 0) {
+              const diff = beInvQty - lotsTotal;
+              if (diff !== 0) {
+                const firstLotId = productLots[0].id;
+                stockLots = stockLots.map((lot) => {
+                  if (lot.id === firstLotId) {
+                    const newQty = lot.quantity + diff;
+                    return { ...lot, quantity: newQty > 0 ? newQty : beInvQty };
+                  }
+                  return lot;
+                });
+                const finalLotsTotal = stockLots.filter((lot) => lot.productId === product.id).reduce((sum, lot) => sum + lot.quantity, 0);
+                if (finalLotsTotal !== beInvQty) {
+                  stockLots = stockLots.filter((lot) => lot.productId !== product.id || lot.id === firstLotId);
+                  stockLots = stockLots.map((lot) => lot.id === firstLotId ? { ...lot, quantity: beInvQty } : lot);
+                }
+              }
+            } else {
+              stockLots.push({
+                id: `sl-${product.id}`,
+                productId: product.id,
+                locationId: "l-sr1",
+                quantity: beInvQty,
+                rate: product.purchasePrice || 100,
+              });
+            }
+          });
+
+          let locations = get().locations.map((loc) => ({ ...loc, occupancy: 0 }));
+          stockLots.forEach((lot) => {
+            const parentIds = getLocationPath(locations, lot.locationId).map((location) => location.id);
+            locations = locations.map((loc) =>
+              parentIds.includes(loc.id)
+                ? { ...loc, occupancy: Math.min(loc.capacity, loc.occupancy + lot.quantity) }
+                : loc
+            );
+          });
+
+          const movements = beMovements.map((bm: any) => {
+            const existing = get().movements.find((m) => m.id === bm.id);
+            if (existing) return existing;
+            return {
+              id: bm.id,
+              number: `MOV-${bm.id.slice(0, 4).toUpperCase()}`,
+              type: bm.type as "IN" | "OUT",
+              productId: bm.productId,
+              quantity: bm.quantity,
+              date: bm.createdAt ? bm.createdAt.slice(0, 10) : today(),
+              createdBy: "u-admin",
+            };
+          });
+
+          const salesInvoices = beInvoices.map((bi: any) => {
+            const existing = get().salesInvoices.find((si) => si.id === bi.id || si.number === bi.invoiceNumber);
+            const lines = (bi.items || []).map((line: any, idx: number) => ({
+              id: line.id || `${bi.id}-ln-${idx + 1}`,
+              productId: line.productId,
+              lotId: `sl-${line.productId}`,
+              locationId: "l-sr1",
+              description: line.product?.name ?? "Product",
+              hsnCode: line.product?.sku ?? "",
+              quantity: line.quantity,
+              unit: "pcs",
+              rate: Number(line.price),
+              discountPct: 0,
+              taxableValue: line.quantity * Number(line.price),
+              gstRate: 18,
+              cgst: 0,
+              sgst: 0,
+              igst: 0,
+              total: line.quantity * Number(line.price),
+            }));
+
+            const totalVal = Number(bi.total);
+
+            if (existing) {
+              return {
+                ...existing,
+                id: bi.id,
+                number: bi.invoiceNumber,
+                customerId: bi.customerId,
+                grandTotal: totalVal,
+                subTotal: totalVal,
+                taxableTotal: totalVal,
+                lines,
+              };
+            }
+
+            return {
+              id: bi.id,
+              number: bi.invoiceNumber,
+              date: bi.createdAt ? bi.createdAt.slice(0, 10) : today(),
+              customerId: bi.customerId,
+              customerGstNumber: "",
+              placeOfSupply: "Maharashtra",
+              paymentTerms: "Due on receipt",
+              pushedToTally: false,
+              lines,
+              subTotal: totalVal,
+              discountTotal: 0,
+              taxableTotal: totalVal,
+              cgstTotal: 0,
+              sgstTotal: 0,
+              igstTotal: 0,
+              grandTotal: totalVal,
+              status: "draft" as const,
+              pdfGenerated: false,
+              createdBy: "u-admin",
+              createdAt: bi.createdAt || new Date().toISOString(),
+            };
+          });
+
+          set({
+            products,
+            vendors,
+            customers,
+            stockLots,
+            locations,
+            movements,
+            salesInvoices,
+            categories,
+          });
+        } catch (err) {
+          console.error("Failed to sync WMS with backend:", err);
+        }
+      },
     }),
     {
       name: "officeflow-wms-store",

@@ -129,6 +129,8 @@ export const officeflowApi = {
     list: () => unwrap<InventoryRecord[]>(api.get("/inventory")),
     lowStock: (threshold = 10) =>
       unwrap<InventoryRecord[]>(api.get(`/inventory/low-stock?threshold=${threshold}`)),
+    movements: () =>
+      unwrap<any[]>(api.get("/inventory/movements")),
     stockIn: (productId: string, quantity: number) =>
       unwrap<InventoryRecord>(api.post("/inventory/stock-in", { productId, quantity })),
     stockOut: (productId: string, quantity: number) =>

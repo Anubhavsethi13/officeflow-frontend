@@ -40,8 +40,8 @@ function StockInPage() {
 
   const total = lines.reduce((sum, line) => sum + line.qty * line.rate, 0);
 
-  const save = () => {
-    const result = receiveStock({ vendorId: vendor, locationId: location, invoice, po, lines });
+  const save = async () => {
+    const result = await receiveStock({ vendorId: vendor, locationId: location, invoice, po, lines });
     toast[result.ok ? "success" : "error"](result.message);
     if (result.ok) {
       setInvoice("");
